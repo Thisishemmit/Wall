@@ -19,98 +19,140 @@ precision mediump float;
 
 uniform vec2 resolution;
 uniform float time;
+uniform sampler2D noise2;
 
+#define iChannel0 noise2
 #define iTime time
+#define STEP 256
+#define EPS .001
 
-// By Jared Berghold 2022 (https://www.jaredberghold.com/)
-// Based on the "Simplicity Galaxy" shader by CBS (https://www.shadertoy.com/view/MslGWN)
-// The nebula effect is based on the kaliset fractal (https://softologyblog.wordpress.com/2011/05/04/kalisets-and-hybrid-ducks/)
 
-const int MAX_ITER = 18;
+// from various shader by iq
 
-float field(vec3 p, float s, int iter)
+float smin( float a, float b, float k )
 {
-	float accum = s / 4.0;
-	float prev = 0.0;
-	float tw = 0.0;
-	for (int i = 0; i < MAX_ITER; ++i)
-  	{
-		if (i >= iter) // drop from the loop if the number of iterations has been completed - workaround for GLSL loop index limitation
-		{
-			break;
-		}
-		float mag = dot(p, p);
-		p = abs(p) / mag + vec3(-0.5, -0.4, -1.487);
-		float w = exp(-float(i) / 5.0);
-		accum += w * exp(-9.025 * pow(abs(mag - prev), 2.2));
-		tw += w;
-		prev = mag;
-	}
-	return max(0.0, 5.2 * accum / tw - 0.65);
+    float h = clamp( 0.5+0.5*(b-a)/k, 0.0, 1.0 );
+    return mix( b, a, h ) - k*h*(1.0-h);
 }
 
-vec3 nrand3(vec2 co)
+const mat2 m = mat2(.8,.6,-.6,.8);
+
+float noise( in vec2 x )
 {
-	vec3 a = fract(cos(co.x*8.3e-3 + co.y) * vec3(1.3e5, 4.7e5, 2.9e5));
-	vec3 b = fract(sin(co.x*0.3e-3 + co.y) * vec3(8.1e5, 1.0e5, 0.1e5));
-	vec3 c = mix(a, b, 0.5);
-	return c;
+	return sin(1.5*x.x)*sin(1.5*x.y);
 }
 
-vec4 starLayer(vec2 p, float time)
+float fbm6( vec2 p )
 {
-	vec2 seed = 1.9 * p.xy;
-	seed = floor(seed * max(resolution.x, 600.0) / 1.5);
-	vec3 rnd = nrand3(seed);
-	vec4 col = vec4(pow(rnd.y, 17.0));
-	float mul = 10.0 * rnd.x;
-	col.xyz *= sin(time * mul + mul) * 0.25 + 1.0;
-	return col;
+    float f = 0.0;
+    f += 0.500000*(0.5+0.5*noise( p )); p = m*p*2.02;
+    f += 0.250000*(0.5+0.5*noise( p )); p = m*p*2.03;
+    f += 0.125000*(0.5+0.5*noise( p )); p = m*p*2.01;
+    f += 0.062500*(0.5+0.5*noise( p )); p = m*p*2.04;
+    //f += 0.031250*(0.5+0.5*noise( p )); p = m*p*2.01;
+    f += 0.015625*(0.5+0.5*noise( p ));
+    return f/0.96875;
+}
+
+
+mat2 getRot(float a)
+{
+    float sa = sin(a), ca = cos(a);
+    return mat2(ca,-sa,sa,ca);
+}
+
+
+vec3 _position;
+
+float sphere(vec3 center, float radius)
+{
+    return distance(_position,center) - radius;
+}
+
+float hozPlane(float height)
+{
+    return distance(_position.y,height);
+}
+
+float swingPlane(float height)
+{
+    vec3 pos = _position + vec3(0.,0.,iTime * 2.5);
+    float def =  fbm6(pos.xz * .25) * 1.;
+
+    float way = pow(abs(pos.x) * 34. ,2.5) *.0000125;
+    def *= way;
+
+    float ch = height + def;
+    return max(pos.y - ch,0.);
+}
+
+float map(vec3 pos)
+{
+    _position = pos;
+
+    float dist;
+    dist = swingPlane(0.);
+
+    float sminFactor = 5.25;
+    dist = smin(dist,sphere(vec3(0.,-15.,80.),45.),sminFactor);
+    return dist;
+}
+
+
+vec3 getNormal(vec3 pos)
+{
+    vec3 nor = vec3(0.);
+    vec3 vv = vec3(0.,1.,-1.)*.01;
+    nor.x = map(pos + vv.zxx) - map(pos + vv.yxx);
+    nor.y = map(pos + vv.xzx) - map(pos + vv.xyx);
+    nor.z = map(pos + vv.xxz) - map(pos + vv.xxy);
+    nor /= 2.;
+    return normalize(nor);
 }
 
 void mainImage( out vec4 fragColor, in vec2 fragCoord )
 {
-    float time = iTime / (resolution.x / 1000.0);
+	vec2 uv = (fragCoord.xy-.5*resolution.xy)*2./resolution.y;
 
-    // first layer of the kaliset fractal
-	vec2 uv = 2.0 * fragCoord / resolution.xy - 1.0;
-  	vec2 uvs = uv * resolution.xy / max(resolution.x, resolution.y);
-	vec3 p = vec3(uvs / 2.5, 0.0) + vec3(0.8, -1.3, 0.0);
-	p += 0.45 * vec3(sin(time / 32.0), sin(time / 24.0), sin(time / 64.0));
+    vec3 rayOrigin = vec3(uv + vec2(0.,6.), -1. );
 
-	// adjust first layer position based on mouse movement
-	p.x += mix(-0.02, 0.02, (1. / resolution.x));
-	p.y += mix(-0.02, 0.02, (1. / resolution.y));
+    vec3 rayDir = normalize(vec3(uv , 1.));
 
-	float freqs[4];
-	freqs[0] = 0.45;
-	freqs[1] = 0.4;
-	freqs[2] = 0.15;
-	freqs[3] = 0.9;
+   	rayDir.zy = getRot(.05) * rayDir.zy;
+   	rayDir.xy = getRot(.075) * rayDir.xy;
 
-	float t = field(p, freqs[2], 13);
-	float v = (1.0 - exp((abs(uv.x) - 1.0) * 6.0)) * (1.0 - exp((abs(uv.y) - 1.0) * 6.0));
+    vec3 position = rayOrigin;
 
-    // second layer of the kaliset fractal
-	vec3 p2 = vec3(uvs / (4.0 + sin(time * 0.11) * 0.2 + 0.2 + sin(time * 0.15) * 0.3 + 0.4), 4.0) + vec3(2.0, -1.3, -1.0);
-	p2 += 0.16 * vec3(sin(time / 32.0), sin(time / 24.0), sin(time / 64.0));
 
-	// adjust second layer position based on mouse movement
-	p2.x += mix(-0.01, 0.01, (1. / resolution.x));
-	p2.y += mix(-0.01, 0.01, (1. / resolution.y));
-	float t2 = field(p2, freqs[3], 18);
-	vec4 c2 = mix(0.5, 0.2, v) * vec4(5.5 * t2 * t2 * t2, 2.1 * t2 * t2, 2.2 * t2 * freqs[0], t2);
+    float curDist;
+    int nbStep = 0;
 
-	// add stars (source: https://glslsandbox.com/e#6904.0)
-	vec4 starColour = vec4(0.0);
-	starColour += starLayer(p.xy, time); // add first layer of stars
-	starColour += starLayer(p2.xy, time); // add second layer of stars
+    for(; nbStep < STEP;++nbStep)
+    {
+        curDist = map(position + (texture(iChannel0, position.xz) - .5).xyz * .005);
 
-	const float brightness = 1.0;
-	vec4 colour = mix(freqs[3] - 0.3, 1.0, v) * vec4(1.5 * freqs[2] * t * t * t, 1.2 * freqs[1] * t * t, freqs[3] * t, 1.0) + c2 + starColour;
-	fragColor = vec4(brightness * colour.xyz, 1.0);
+        if(curDist < EPS)
+            break;
+        position += rayDir * curDist * .5;
+    }
+
+    float f;
+
+    //sound = sin(iTime) * .5 + .5;
+
+    float dist = distance(rayOrigin,position);
+    f = dist /(98.);
+    f = float(nbStep) / float(STEP);
+
+    f *= .8;
+    vec3 col = vec3(f);
+
+
+    //float shouldColor = 1.- step(f,threshold);
+    //col = mix(col,vec3(1.,0.,0.) ,shouldColor);
+
+    fragColor = vec4(col,1.0);
 }
-
 out vec4 frag;
 void main() {
 	vec4 fragment_color;
@@ -231,13 +273,13 @@ async function render() {
     gl.uniform2f(resolutionUniformLocation, gl.canvas.width, gl.canvas.height);
     gl.uniform1f(timeUniformLocation, time);
 
-    /* gl.activeTexture(gl.TEXTURE0);
+    gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, noiseTexture);
     gl.uniform1i(noise2UniformLocation, 0);
 
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, fontTexture);
-    gl.uniform1i(font1UniformLocation, 1); */
+    gl.uniform1i(font1UniformLocation, 1);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     log.textContent = `Time: ${time}, Frame: ${frameNumber}`;
